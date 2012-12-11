@@ -1,4 +1,5 @@
 library(e1071)
+library(rpart)
 
 # Read in data
 pr.raw <- read.table('./AugerSim/simEpos_Proton_wXmax.dat')
@@ -40,18 +41,6 @@ colnames(feSim) <- c(names, 'comp')
 
 simData <- rbind(prSim, feSim)
 
-# Select a subset with z<10 and 0.5<=E/EeV<1.5
-#prSimVL <- prSim[ which(prSim$z<10. & prSim$e<1.5 & prSim$e>=0.5) , ]
-#feSimVL <- feSim[ which(feSim$z<10. & feSim$e<1.5 & feSim$e>=0.5) , ]
-
-#N_training = 100
-#N_testing  = 100
-
-#idx_pr <- sample( seq(1,length(prSimVL$e)), N_training+N_testing )
-#idx_fe <- sample( seq(1,length(feSimVL$e)), N_training+N_testing )
-
-#sampleTrain <- rbind( prSimVL[idx_pr[1:100],]   , feSimVL[idx_fe[1:100],]   )
-#sampleTest  <- rbind( prSimVL[idx_pr[101:200],] , feSimVL[idx_fe[101:200],] )
 
 ztab <- matrix(c(22, 29, 43, 47, 55, 58.75), ncol=2, byrow=T) 
 etab <- matrix(c(18.0, 18.66, 18.66, 19.15, 19.15, 19.65), ncol=2, byrow=T)
@@ -154,27 +143,85 @@ colNorm <- function( c ) {
 rnSimData <- as.data.frame( apply(simData[,c(1:6,8)], 2, colNorm) )
 comp <- simData[,10]
 
-# Straight classification without PCA
-## Naive Bayes
-mod.nby <- naiveBayes(comp ~ ., data=rnSimData)
-prd.nby <- predict(mod.nby, rnSimData)
-tbl.nby <- table(prd.nby, comp)
-## SVM
-#mod.svm <- svm(comp ~ ., data=rnSimData[,-8])
-#prd.svm <- predict(mod.svm, rnSimData[,-8])
-#tbl.svm <- table(prd.svm, comp)
+etab <- c(17.4, 18.10, 18.65, 19.15, 19.65, 20.10, 20.65, 21.20)
+emid <- NULL
+for(i in 1:(length(etab)-1)) {
+  emid <- c(emid, (etab[i]+etab[i+1])/2)
+}
+classErr.nby <- NULL
+prClassErr.nby <- NULL
+feClassErr.nby <- NULL
+classErr.svm <- NULL
+prClassErr.svm <- NULL
+feClassErr.svm <- NULL
+classErr.crt <- NULL
+for(i in 1:(length(etab)-1)) {
+  elow_char <- as.character(etab[i])
+  ehig_char <- as.character(etab[i+1])
+  print(">>>")
+  print(paste(elow_char, ehig_char, sep=" "))
+  iCov <- which(simData$energy>=etab[i] & simData$energy<etab[i+1])
+  icomp <- comp[iCov] 
+  irnData <- rnSimData[iCov,]
+  pca <- princomp(irnData)
+  c1 <- t( t(as.matrix(pca$loadings[,1])) %*% t(irnData) )
+  c2 <- t( t(as.matrix(pca$loadings[,2])) %*% t(irnData) )
+  c3 <- t( t(as.matrix(pca$loadings[,3])) %*% t(irnData) )
+  c4 <- t( t(as.matrix(pca$loadings[,4])) %*% t(irnData) )
+  pcData <- as.data.frame( matrix(c(c1, c2, c3, c4), ncol=4, byrow=F) )
+  colnames(pcData) <- c('comp1', 'comp2', 'comp3', 'comp4')
+  ## Create training set and testing set
+  rndIdx <- sample.int(length(icomp))
+  shuffledData   <- pcData[rndIdx,]
+  shuffledTarget <- icomp[rndIdx]
+  critIdx <- floor(length(shuffledData[,1])*0.5)
+  trainData <- shuffledData[1:critIdx,]
+  trainTarget <- shuffledTarget[1:critIdx]
+  testData <- shuffledData[(critIdx+1):length(shuffledData[,1]),]
+  testTarget <- shuffledTarget[(critIdx+1):length(shuffledData[,1])]
+  ## Naive Bayes Classifier
+  nby.mod <- naiveBayes(trainTarget ~ ., data=trainData)
+  nby.prd <- predict(nby.mod, testData)
+  nby.tab <- table(testTarget, nby.prd)
+  print(nby.tab)
+  classErr.nby <- c(classErr.nby, 1-sum(nby.prd==testTarget)/length(nby.prd))
+  prClassErr.nby <- c(prClassErr.nby, nby.tab[1,2]/sum(nby.tab[1,]))
+  feClassErr.nby <- c(feClassErr.nby, nby.tab[2,1]/sum(nby.tab[2,]))
+  ## SVM
+  svm.mod <- svm(trainTarget ~ ., data=trainData)
+  svm.prd <- predict(svm.mod, testData)
+  svm.tab <- table(testTarget, svm.prd)
+  print(svm.tab)
+  classErr.svm <- c(classErr.svm, 1-sum(svm.prd==testTarget)/length(svm.prd))
+  prClassErr.svm <- c(prClassErr.svm, svm.tab[1,2]/sum(svm.tab[1,]))
+  feClassErr.svm <- c(feClassErr.svm, svm.tab[2,1]/sum(svm.tab[2,]))
+  ## rpart
+  crt.mod <- rpart(trainTarget ~ ., data=trainData)
+  crt.reg <- predict(crt.mod, testData)
+  crt.prd <- NULL
+  crt.prd[(crt.reg[,1]>=crt.reg[,2])] = 'pr'
+  crt.prd[(crt.reg[,1]<crt.reg[,2])]  = 'fe'
+  crt.prd <- as.factor(crt.prd)
+  #crt.tab <- table(testTarget, crt.prd)
+  classErr.crt <- c(classErr.crt, 1-sum(crt.prd==testTarget)/length(crt.prd))
+}
 
-# Reduction of dimensions with PCA before classifying
-## PCA
-pca <- princomp(rnSimData)
-summary(pca) # Use the first 4 princ. componets (+94% of Var)
-c1 <- t(as.matrix(pca$loadings[,1])) %*% t(rnSimData)
-c2 <- t(as.matrix(pca$loadings[,2])) %*% t(rnSimData)
-c3 <- t(as.matrix(pca$loadings[,3])) %*% t(rnSimData)
-c4 <- t(as.matrix(pca$loadings[,4])) %*% t(rnSimData)
-trnSimData <- as.data.frame( matrix( c(c1, c2, c3, c4), ncol=4, byrow=F) ) 
-colnames(trnSimData) <- c('c1', 'c2', 'c3', 'c4')
-## Naive Bayes
-mod.pca.nby <- naiveBayes(comp ~ ., data=trnSimData)
-prd.pca.nby <- predict(mod.pca.nby, trnSimData)
-tbl.pca.nby <- table(prd.pca.nby, comp)
+# Plot the classification errors for each algorithm
+## plot a empty frame
+plot(emid, classErr.nby, xlim=c(floor(etab[1]), 21.5), 
+     ylim=c(0.1, 0.4), xlab='log(E)', ylab='Classification Error',
+     main="Error in Classification")
+## Add line markers for the energy ranges
+for( i in 1:length(etab) ) {
+  abline(v=etab[i], col='green', lty=2)
+  energy.char <- as.character(etab[i])
+  text(etab[i], 0.1, energy.char)
+}
+## Add horizontal eye guides 
+abline(h=seq(0.1,0.4,0.05), col='gray', lty=1)
+## Add the actual plots
+points(emid, classErr.nby, ty='b', pch=1, col='black')
+points(emid, classErr.crt, ty='b', pch=2, col='red')
+points(emid, classErr.svm, ty='b', pch=5, col='blue')
+legend('topright', c("Naive Bayes", "CART", "SVM"), pch=c(1,2,5), 
+       col=c('black','red','blue'), lty=rep(1,3), bg='white')
